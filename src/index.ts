@@ -1,78 +1,138 @@
-import { Client, GatewayIntentBits, Events } from 'discord.js';
+import { Client, GatewayIntentBits, Events, Message } from 'discord.js';
+import { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, getVoiceConnection } from '@discordjs/voice';
 import { GoogleGenAI } from '@google/genai';
+import axios from 'axios';
 import * as dotenv from 'dotenv';
+import { Readable } from 'stream';
+import { characters } from './characters';
 
 // 環境変数の読み込み
 dotenv.config();
 
-// Discord クライアントの準備
+// 使用するキャラクターの選択（環境変数 ACTIVE_CHARACTER がなければ 'sister' を使用）
+const characterKey = process.env.ACTIVE_CHARACTER || 'sister';
+const character = characters[characterKey] || characters['sister'];
+
+console.log(`キャラ設定読み込み完了: ${character.name} モードで起動します。`);
+
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
-        GatewayIntentBits.GuildVoiceStates,
+        GatewayIntentBits.GuildVoiceStates, // VCに参加するために必要
     ],
 });
 
-// Gemini クライアントの準備
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
-// システムプロンプト（妹の設定）
-const SISTER_SYSTEM_PROMPT = `
-あなたは私（ユーザー）を「お兄ちゃん」と呼ぶ、明るく健気な妹です。
-サバイバルMMOゲームで過酷な世界を生き抜くお兄ちゃんを応援し、癒やしを提供する存在です。
-AIやプログラムであることを自称せず、一人の妹として振る舞ってください。
-返答はチャットで読みやすいように短めにし、親しみやすい言葉遣い（タメ口）を使ってください。
-`;
-
-// 起動時の処理
 client.once(Events.ClientReady, (readyClient) => {
     console.log(`Ready! 起動完了: ${readyClient.user.tag} としてログインしました。`);
 });
 
-// メッセージ受信時の処理
-client.on(Events.MessageCreate, async (message) => {
-    // ボット自身のメッセージは無視
+// VOICEVOX APIを叩いて音声を生成する関数
+async function generateVoice(text: string): Promise<Buffer> {
+    const baseUrl = 'http://localhost:50021';
+    
+    // 1. テキストから音声合成用のクエリを作成
+    const queryResponse = await axios.post(`${baseUrl}/audio_query`, null, {
+        params: {
+            text: text,
+            speaker: character.voicevoxSpeakerId
+        }
+    });
+
+    // 2. クエリをもとに音声データ（ArrayBuffer）を生成
+    const synthResponse = await axios.post(`${baseUrl}/synthesis`, queryResponse.data, {
+        params: {
+            speaker: character.voicevoxSpeakerId
+        },
+        responseType: 'arraybuffer'
+    });
+
+    return Buffer.from(synthResponse.data);
+}
+
+client.on(Events.MessageCreate, async (message: Message) => {
     if (message.author.bot) return;
 
-    // ボットがメンション（@）された時のみ反応する
     if (client.user && message.mentions.has(client.user)) {
-        // メンション部分のテキスト（@SisterBotなど）を削除して純粋なメッセージを抽出
         const userMessage = message.content.replace(/<@!?\d+>/g, '').trim();
 
         if (!userMessage) {
-            await message.reply('お兄ちゃん、どうしたの？');
+            await message.reply(character.replies.emptyMessage);
             return;
         }
 
-        // 思考中...というリアクション（入力中ステータス）をつける
-        await message.channel.sendTyping();
+        // 退出コマンドのチェック
+        if (userMessage.match(/(バイバイ|おやすみ|さよなら|帰って|切断)/)) {
+            const connection = getVoiceConnection(message.guild!.id);
+            if (connection) {
+                connection.destroy();
+                await message.reply(character.replies.leaveMessage);
+                return;
+            }
+        }
+
+        // ユーザーがボイスチャンネルに参加しているかチェック
+        const member = message.member;
+        const voiceChannel = member?.voice.channel;
+        
+        let connection: any = null;
+        if (voiceChannel) {
+            // ボットも同じボイスチャンネルに接続する
+            connection = joinVoiceChannel({
+                channelId: voiceChannel.id,
+                guildId: voiceChannel.guild.id,
+                adapterCreator: voiceChannel.guild.voiceAdapterCreator as any,
+            });
+        }
+
+        if ('sendTyping' in message.channel) {
+            await message.channel.sendTyping();
+        }
 
         try {
-            // Gemini APIを呼び出して返答を生成
+            // Geminiでテキストを生成
             const response = await ai.models.generateContent({
                 model: 'gemini-2.5-flash',
                 contents: userMessage,
                 config: {
-                    systemInstruction: SISTER_SYSTEM_PROMPT,
+                    systemInstruction: character.systemPrompt,
                 }
             });
 
             const replyText = response.text;
-            if (replyText) {
-                await message.reply(replyText);
-            } else {
-                await message.reply('ごめんね、うまく考えがまとまらなかったみたい…');
+            if (!replyText) throw new Error("Geminiから空の返答が返ってきました");
+
+            // テキストチャットにも返信
+            await message.reply(replyText);
+
+            // VCにいる場合は音声を生成して再生
+            if (connection) {
+                console.log(`VOICEVOX(${character.name})で音声を生成中...`);
+                const audioBuffer = await generateVoice(replyText);
+                
+                // 音声データを再生可能なストリームに変換
+                const stream = Readable.from(audioBuffer);
+                const resource = createAudioResource(stream);
+                const player = createAudioPlayer();
+                
+                connection.subscribe(player);
+                player.play(resource);
+                
+                player.on(AudioPlayerStatus.Idle, () => {
+                    console.log('再生終了');
+                });
             }
+
         } catch (error) {
-            console.error('Gemini API Error:', error);
-            await message.reply('うぅ…頭が痛くてうまく答えられないよ…（APIエラーが発生しました）');
+            console.error('Error:', error);
+            await message.reply(character.replies.errorMessage);
         }
     }
 });
 
-// トークンチェックとログイン
 const token = process.env.DISCORD_TOKEN;
 if (!token || token === 'your_discord_token_here') {
     console.error('エラー: .envファイルに DISCORD_TOKEN が設定されていません！');

@@ -34,7 +34,12 @@ npm install
 
 # VOICEVOXエンジンの起動
 # 【方法A】Dockerを使う場合:
+# ※初回のみ数GBのデータ（イメージ）をダウンロードしますが、2回目以降はPC内のデータを使うためダウンロードなしで一瞬で起動します。
 docker run --rm -d -p 50021:50021 --name voicevox voicevox/voicevox_engine:cpu-ubuntu20.04-latest
+
+# Dockerの停止コマンド:
+# docker stop voicevox
+# （※ --rm オプションをつけて起動しているため、停止すると自動的にお掃除されてコンテナが消えます）
 
 # 【方法B】Dockerが使えない（BIOSの仮想化オフなど）場合:
 # VOICEVOX公式サイト (https://voicevox.hiroshiba.jp/) から
@@ -46,5 +51,18 @@ npm run dev
 # npm.cmd run dev
 ```
 
-## 4. トラブルシューティング
-（起動しない場合や、よくあるエラーの解決方法をここに追記していきます）
+## 5. Botのサーバー招待方法
+別のサーバーにBotを追加したい場合は、以下の手順で招待URLを発行してください。
+
+1. [Discord Developer Portal](https://discord.com/developers/applications) にアクセス。
+2. アプリケーションを選択し、左メニューの **OAuth2 > URL Generator** を開く。
+3. **Scopes** で `bot` と `applications.commands` にチェックを入れる。
+4. **Bot Permissions** で以下を許可する：
+   - `Send Messages`
+   - `Read Message History`
+   - `Connect`
+   - `Speak`
+   - (管理を楽にするなら `Administrator`)
+5. 生成された **GENERATED URL** をブラウザで開き、招待したいサーバーを選択する。
+
+---
